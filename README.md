@@ -1,1 +1,356 @@
 # obake-game
+
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ぽかんゴースト鬼ごっこ（BGMつき）</title>
+<style>
+  :root{
+    --sky1:#b3e5fc;
+    --sky2:#e1f5fe;
+  }
+  html,body{height:100%;margin:0;background:linear-gradient(var(--sky1), var(--sky2));}
+  body{font-family:system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; color:#0f1c2e;}
+  #wrap{min-height:100%;display:flex;flex-direction:column;align-items:center;gap:10px;padding:10px}
+  #gameCanvas{display:block;background:transparent;border:3px solid #9ec8ff;border-radius:16px;touch-action:none}
+  .hud{display:flex;gap:16px;align-items:center;flex-wrap:wrap;font-weight:800}
+  .overlay{
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(255,255,255,0.9); backdrop-filter:saturate(1.2) blur(2px);
+    flex-direction:column; gap:14px; z-index:10;
+  }
+  .btn{
+    padding:10px 16px; border:2px solid #7aa8ff; border-radius:12px; background:#fff; font-weight:900; font-size:16px;
+  }
+  .btn:active{transform:scale(0.98)}
+  .note{opacity:.7;font-size:12px;text-align:center}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div class="hud">
+    <div>残り：<span id="time">30.0</span>s</div>
+    <div>ベスト：<span id="best">0.0</span>s</div>
+    <button id="mute" class="btn">🔊 ON</button>
+    <div id="status"></div>
+  </div>
+  <canvas id="gameCanvas" width="420" height="640" aria-label="ぽかんゴーストから逃げろ"></canvas>
+  <div class="note">←→↑↓ / WASD で移動。スマホは画面ドラッグでもOK。音が出ないときは🔊をON & 画面を一度タップしてね。</div>
+</div>
+
+<div id="overlay" class="overlay">
+  <div style="font-weight:900;font-size:20px;">👻 ゆるカワ暴走おばけ鬼ごっこ</div>
+  <div class="note">音を有効にするには「スタート」を押してね。</div>
+  <button id="startBtn" class="btn">▶ スタート</button>
+</div>
+
+<script>
+(() => {
+  // ===== Canvas & Game =====
+  const cv = document.getElementById('gameCanvas');
+  const ctx = cv.getContext('2d');
+  function fit(){
+    // keep aspect but fit to viewport (with margins)
+    const scale = Math.min((window.innerWidth-20)/cv.width, (window.innerHeight-160)/cv.height);
+    cv.style.width = (cv.width*scale)+'px';
+    cv.style.height = (cv.height*scale)+'px';
+  }
+  fit(); addEventListener('resize', fit);
+
+  const timeEl = document.getElementById('time');
+  const bestEl = document.getElementById('best');
+  const statusEl = document.getElementById('status');
+  const muteBtn = document.getElementById('mute');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+
+  const state = {
+    playing:false, paused:false, over:false,
+    goal:30.0, timeLeft:30.0, best:0.0,
+    last:performance.now(), dt:0,
+    player:{ x:cv.width/2, y:cv.height*0.75, r:12, speed:2.4, vx:0, vy:0 },
+    ghosts:[],
+    input:{left:0,right:0,up:0,down:0},
+    bg:{clouds:[], stars:[]}
+  };
+  try{ state.best = parseFloat(localStorage.getItem('pokan-best')||'0')||0; }catch(e){}
+  bestEl.textContent = state.best.toFixed(1);
+
+  function makeGhost(x,y,color,speed){
+    return {x,y,color,speed, r:14, jitter:0};
+  }
+  function reset(){
+    state.timeLeft = state.goal; state.over=false; state.playing=true; state.paused=false;
+    state.player.x = cv.width*0.5; state.player.y = cv.height*0.75; state.player.vx=0; state.player.vy=0;
+    state.ghosts = [
+      makeGhost(cv.width*0.2, cv.height*0.2, '#ffb3c7', 3.6),
+      makeGhost(cv.width*0.8, cv.height*0.25, '#bde7ff', 3.3),
+      makeGhost(cv.width*0.5, cv.height*0.18, '#bff7cc', 3.9)
+    ];
+    if(audio.ready){ audio.startBGM(); }
+    statusEl.textContent='';
+  }
+
+  // 背景要素
+  for(let i=0;i<7;i++){ state.bg.clouds.push({x:Math.random()*cv.width, y:Math.random()*cv.height*0.6, s:0.2+Math.random()*0.5, w:60+Math.random()*90}); }
+  for(let i=0;i<18;i++){ state.bg.stars.push({x:Math.random()*cv.width, y:Math.random()*cv.height*0.7, r:1+Math.random()*2, spd:0.2+Math.random()*0.6, shape: Math.random()<0.5?'star':'heart'}); }
+
+  // 入力
+  addEventListener('keydown', e=>{
+    const k=e.key.toLowerCase();
+    if(k==='arrowleft'||k==='a') state.input.left=1;
+    if(k==='arrowright'||k==='d') state.input.right=1;
+    if(k==='arrowup'||k==='w') state.input.up=1;
+    if(k==='arrowdown'||k==='s') state.input.down=1;
+  });
+  addEventListener('keyup', e=>{
+    const k=e.key.toLowerCase();
+    if(k==='arrowleft'||k==='a') state.input.left=0;
+    if(k==='arrowright'||k==='d') state.input.right=0;
+    if(k==='arrowup'||k==='w') state.input.up=0;
+    if(k==='arrowdown'||k==='s') state.input.down=0;
+  });
+  cv.addEventListener('pointerdown', e=>{ follow(e); cv.setPointerCapture(e.pointerId); if(audio.ctx && audio.ctx.state==='suspended') audio.ctx.resume(); });
+  cv.addEventListener('pointermove', e=>{ if(e.buttons) follow(e); });
+  function follow(e){
+    const rect = cv.getBoundingClientRect();
+    const x = (e.clientX-rect.left)/rect.width*cv.width;
+    const y = (e.clientY-rect.top)/rect.height*cv.height;
+    const dx = x - state.player.x, dy = y - state.player.y;
+    const len = Math.hypot(dx,dy) || 1;
+    const s = state.player.speed*0.9;
+    state.player.vx = dx/len * s; state.player.vy = dy/len * s;
+  }
+
+  // ===== WebAudio: cute pico BGM + SFX =====
+  const audio = {
+    ctx:null, master:null, mute:false, seqTimer:null, ready:false,
+    bpmBase:112, bpm:112, // base tempo
+    start(){
+      if(this.ctx) return;
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.master = this.ctx.createGain(); this.master.gain.value = 0.12; this.master.connect(this.ctx.destination);
+      this.ready = true;
+    },
+    startBGM(){
+      if(!this.ctx) this.start();
+      if(this.seqTimer) return; // already running
+      this.scheduleLoop();
+    },
+    stopBGM(){
+      if(this.seqTimer){ clearTimeout(this.seqTimer); this.seqTimer=null; }
+    },
+    scheduleLoop(){
+      if(!this.ctx) return;
+      const beatMs = 60000/this.bpm;
+      const now = this.ctx.currentTime;
+      // simple 4-beat cute loop (square lead + noise hat)
+      for(let i=0;i<4;i++){
+        const t = now + i*(beatMs/1000);
+        // lead
+        const o = this.ctx.createOscillator(); o.type='square';
+        const g = this.ctx.createGain(); g.gain.value=0.0001;
+        const scale = [0,2,4,7,9]; // major pentatonic
+        const midi = 72 + scale[(i*2)%scale.length]; // C5 base
+        o.frequency.value = 440 * Math.pow(2,(midi-69)/12);
+        o.connect(g).connect(this.master);
+        g.gain.setValueAtTime(0.0, t);
+        g.gain.linearRampToValueAtTime(0.12, t+0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t+0.18);
+        o.start(t); o.stop(t+0.22);
+        // hat noise
+        const buf = this.ctx.createBuffer(1, this.ctx.sampleRate*0.05, this.ctx.sampleRate);
+        const data = buf.getChannelData(0); for(let j=0;j<data.length;j++) data[j] = Math.random()*2-1;
+        const src = this.ctx.createBufferSource(); src.buffer = buf;
+        const hp = this.ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=6000;
+        const gn = this.ctx.createGain(); gn.gain.value=0.06;
+        src.connect(hp).connect(gn).connect(this.master);
+        src.start(t);
+      }
+      this.seqTimer = setTimeout(()=>this.scheduleLoop(), (beatMs*4)*0.9);
+    },
+    sfxWin(){
+      if(!this.ctx) return;
+      const t0 = this.ctx.currentTime;
+      const seq = [0,4,7,12,7,12,16]; // arpeggio
+      seq.forEach((n,i)=>{
+        const t = t0 + i*0.09;
+        const o = this.ctx.createOscillator(); o.type='square';
+        const g = this.ctx.createGain(); g.gain.value=0.0001;
+        const midi = 76 + n;
+        o.frequency.value = 440 * Math.pow(2,(midi-69)/12);
+        o.connect(g).connect(this.master);
+        g.gain.setValueAtTime(0.0, t);
+        g.gain.linearRampToValueAtTime(0.2, t+0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t+0.25);
+        o.start(t); o.stop(t+0.3);
+      });
+    },
+    sfxLose(){
+      if(!this.ctx) return;
+      const t0 = this.ctx.currentTime;
+      const o = this.ctx.createOscillator(); o.type='sawtooth';
+      const g = this.ctx.createGain(); g.gain.value=0.15;
+      o.connect(g).connect(this.master);
+      o.frequency.setValueAtTime(600, t0);
+      o.frequency.exponentialRampToValueAtTime(120, t0+0.7);
+      g.gain.setValueAtTime(0.15, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0+0.75);
+      o.start(t0); o.stop(t0+0.8);
+    },
+    toggleMute(){
+      this.mute = !this.mute;
+      if(this.master) this.master.gain.value = this.mute ? 0.0 : 0.12;
+      muteBtn.textContent = this.mute ? '🔇 OFF' : '🔊 ON';
+    }
+  };
+
+  muteBtn.addEventListener('click', ()=>{
+    if(!audio.ctx) audio.start();
+    if(audio.ctx.state==='suspended') audio.ctx.resume();
+    audio.toggleMute();
+  });
+  startBtn.addEventListener('click', ()=>{
+    overlay.style.display='none';
+    audio.start();
+    reset();
+  });
+
+  // ===== Game Step =====
+  function step(dt){
+    if(!state.playing || state.paused || state.over) return;
+
+    state.timeLeft -= dt/1000;
+    timeEl.textContent = Math.max(0, state.timeLeft).toFixed(1);
+    if(state.timeLeft<=0){
+      state.over=true; state.playing=false;
+      statusEl.textContent='🎉 CLEAR!';
+      audio.sfxWin();
+      state.best = Math.max(state.best, state.goal);
+      bestEl.textContent = state.best.toFixed(1);
+      try{ localStorage.setItem('pokan-best', state.best.toFixed(1)); }catch(e){}
+      return;
+    }
+
+    // input vector
+    let ax = (state.input.right - state.input.left);
+    let ay = (state.input.down - state.input.up);
+    if(ax!==0 || ay!==0){
+      const len = Math.hypot(ax,ay); ax/=len; ay/=len;
+      state.player.vx = ax*state.player.speed;
+      state.player.vy = ay*state.player.speed;
+    }
+
+    // player move
+    state.player.x = Math.max(state.player.r, Math.min(cv.width-state.player.r, state.player.x + state.player.vx));
+    state.player.y = Math.max(state.player.r, Math.min(cv.height-state.player.r, state.player.y + state.player.vy));
+
+    // ghosts
+    for(const g of state.ghosts){
+      const dx = state.player.x - g.x, dy = state.player.y - g.y;
+      const dist = Math.hypot(dx,dy) || 1;
+      const pred = 12;
+      const tx = state.player.x + state.player.vx*pred;
+      const ty = state.player.y + state.player.vy*pred;
+      const pdx = tx - g.x, pdy = ty - g.y;
+      g.jitter += (Math.random()-0.5)*0.2; g.jitter *= 0.92;
+      const ang = Math.atan2(pdy, pdx) + g.jitter*0.2;
+      g.x += Math.cos(ang)*g.speed;
+      g.y += Math.sin(ang)*g.speed;
+      g.x = Math.max(g.r, Math.min(cv.width-g.r, g.x));
+      g.y = Math.max(g.r, Math.min(cv.height-g.r, g.y));
+
+      if(dist < state.player.r + g.r - 2){
+        state.over=true; state.playing=false;
+        statusEl.textContent='💥 つかまった！';
+        audio.sfxLose();
+        const survived = state.goal - Math.max(0,state.timeLeft);
+        state.best = Math.max(state.best, survived);
+        bestEl.textContent = state.best.toFixed(1);
+        try{ localStorage.setItem('pokan-best', state.best.toFixed(1)); }catch(e){}
+        break;
+      }
+    }
+
+    // clouds / stars
+    for(const c of state.bg.clouds){ c.x += 0.2*c.s; if(c.x>cv.width+80) c.x=-80; }
+    for(const s of state.bg.stars){ s.y += s.spd*0.2; if(s.y>cv.height*0.8) s.y = Math.random()*cv.height*0.6; }
+  }
+
+  // ===== Draw =====
+  function circle(x,y,r){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); }
+  function fluffy(x,y,w,scale){
+    ctx.beginPath();
+    ctx.arc(x, y, w*0.28*scale, 0, Math.PI*2);
+    ctx.arc(x+w*0.22, y-w*0.1, w*0.24*scale, 0, Math.PI*2);
+    ctx.arc(x+w*0.45, y, w*0.3*scale, 0, Math.PI*2);
+    ctx.arc(x+w*0.22, y+w*0.1, w*0.26*scale, 0, Math.PI*2);
+    ctx.closePath(); ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fill();
+  }
+  function tinyStar(x,y,r){
+    ctx.beginPath();
+    for(let i=0;i<5;i++){
+      const a = i*2*Math.PI/5 - Math.PI/2;
+      const X = x + Math.cos(a)*r*1.6, Y = y + Math.sin(a)*r*1.6;
+      const a2 = a + Math.PI/5;
+      const X2 = x + Math.cos(a2)*r*0.7, Y2 = y + Math.sin(a2)*r*0.7;
+      if(i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y);
+      ctx.lineTo(X2,Y2);
+    }
+    ctx.closePath(); ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fill();
+  }
+  function tinyHeart(x,y,r){
+    ctx.beginPath();
+    ctx.moveTo(x, y + r*0.6);
+    ctx.bezierCurveTo(x+r, y-r*0.4,  x+r*1.2, y+r*0.8, x,  y+r*1.4);
+    ctx.bezierCurveTo(x-r*1.2, y+r*0.8, x-r, y-r*0.4, x, y+r*0.6);
+    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fill();
+  }
+  function drawBackground(){
+    for(const c of state.bg.clouds) fluffy(c.x,c.y,c.w,0.6);
+    for(const s of state.bg.stars){ Math.random()<0.5 ? tinyStar(s.x,s.y,s.r) : tinyHeart(s.x,s.y,s.r*1.2); }
+  }
+  function drawGhost(g){
+    const x=g.x,y=g.y,r=g.r;
+    ctx.fillStyle = g.color;
+    ctx.beginPath();
+    ctx.moveTo(x-r*0.9, y+r*0.9);
+    ctx.lineTo(x-r*0.9, y);
+    ctx.quadraticCurveTo(x-r*0.9, y-r*0.9, x, y-r*0.9);
+    ctx.quadraticCurveTo(x+r*0.9, y-r*0.9, x+r*0.9, y);
+    ctx.lineTo(x+r*0.9, y+r*0.9);
+    for(let i=0;i<4;i++){
+      const xx = x + r*0.9 - i*r*0.45;
+      const yy = y + r*0.9 + (i%2? r*0.14 : -r*0.06);
+      ctx.lineTo(xx, yy);
+    }
+    ctx.closePath(); ctx.fill();
+    // eyes
+    ctx.fillStyle='#fff'; circle(x-r*0.35, y-r*0.1, r*0.18); ctx.fill(); circle(x+r*0.1, y-r*0.1, r*0.18); ctx.fill();
+    ctx.fillStyle='#234'; circle(x-r*0.30, y-r*0.05, r*0.08); ctx.fill(); circle(x+r*0.05, y-r*0.05, r*0.08); ctx.fill();
+    // pokan mouth
+    ctx.fillStyle='#234'; circle(x-r*0.12, y+r*0.12, r*0.11); ctx.fill();
+  }
+  function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    drawBackground();
+    // player
+    ctx.fillStyle = '#ffd400'; circle(state.player.x, state.player.y, state.player.r); ctx.fill();
+    // ghosts
+    for(const g of state.ghosts) drawGhost(g);
+  }
+
+  // ===== Loop =====
+  function loop(){
+    const now = performance.now(); state.dt = now - state.last; state.last = now;
+    step(state.dt); draw();
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
